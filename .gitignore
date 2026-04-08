@@ -1,0 +1,34 @@
+# Data
+dataset/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+dist/
+build/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Optuna / experiment runs
+parallel_runs/
+*.db
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Reproduce outputs
+reproduce/*/logs/
+reproduce/*/figures/
+reproduce/*/metric_results/
+reproduce/*/optuna_results/
+
+# Environment
+.venv*/
+*.env
