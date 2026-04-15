@@ -390,7 +390,7 @@ def theta_cat(observed_y, missing_y, observed_s, missing_s, condition_indices, t
     )
 
     # Ensure the first value is zero for identifiability
-    h2_log_pi = torch.cat([torch.zeros((h2_log_pi_partial.shape[0], 1)), h2_log_pi_partial], dim=1)
+    h2_log_pi = torch.cat([torch.zeros((h2_log_pi_partial.shape[0], 1), device=h2_log_pi_partial.device), h2_log_pi_partial], dim=1)
 
     return h2_log_pi
 

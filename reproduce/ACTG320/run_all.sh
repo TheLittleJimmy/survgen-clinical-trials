@@ -4,7 +4,7 @@ set -e
 # Master reproduction script for ACTG320 experiments
 # Runs all hyperopt + compare steps sequentially in terminal
 
-PROJ=/project/Stat/s1155202253/myproject/survgen-clinical-trials
+PROJ=/project/Stat/s1155202253/myproject/pfizer_projects/survgen-clinical-trials
 SCRIPT=$PROJ/script
 REPRO=$PROJ/reproduce/ACTG320
 LOGDIR=$REPRO/logs

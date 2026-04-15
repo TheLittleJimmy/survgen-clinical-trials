@@ -311,8 +311,8 @@ def mean_mode_like(loglik_params, types_dict):
         elif feature_type == 'pos':
             # Log-normal distribution
             exp_term = torch.exp(attrib[0])
-            mean = torch.maximum(exp_term * torch.exp(0.5 * attrib[1]) - 1.0, torch.zeros(1))
-            mode = torch.maximum(exp_term * torch.exp(-attrib[1]) - 1.0, torch.zeros(1))
+            mean = torch.maximum(exp_term * torch.exp(0.5 * attrib[1]) - 1.0, torch.zeros(1, device=exp_term.device))
+            mode = torch.maximum(exp_term * torch.exp(-attrib[1]) - 1.0, torch.zeros(1, device=exp_term.device))
 
         elif feature_type == 'count':
             # Poisson distribution: mean = lambda, mode = floor(lambda)
@@ -406,4 +406,4 @@ def error_computation(x_train, x_hat, types_dict, miss_mask):
 
         ind_ini = ind_end  # Move to next feature index
 
-    return torch.Tensor(error_observed), torch.Tensor(error_missing)
+    return torch.tensor(error_observed, dtype=torch.float32), torch.tensor(error_missing, dtype=torch.float32)

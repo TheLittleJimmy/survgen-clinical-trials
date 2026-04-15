@@ -155,7 +155,7 @@ def loglik_real(batch_data, list_type, theta, normalization_params, n_generated_
     est_var = data_var * est_var
 
     # Compute log-likelihood using the Gaussian log-likelihood formula
-    log_normalization = -0.5 * torch.log(torch.tensor(2 * torch.pi))
+    log_normalization = -0.5 * torch.log(torch.tensor(2 * torch.pi, device=data.device))
     log_variance_term = -0.5 * torch.sum(torch.log(est_var), dim=1)
     log_exponent = -0.5 * torch.sum((data - est_mean) ** 2 / est_var, dim=1)
 
@@ -362,7 +362,7 @@ def loglik_surv_piecewise(batch_data, list_type, theta, normalization_params, n_
 
     n, K = T_surv_scaled.shape[0], len(intervals)
     eps = 1e-8
-    breaks = torch.cat((torch.Tensor([interval[0] for interval in intervals]), torch.Tensor([intervals[-1][1]])))
+    breaks = torch.cat((torch.tensor([interval[0] for interval in intervals], device=data.device), torch.tensor([intervals[-1][1]], device=data.device)))
     bin_idx = torch.bucketize(T_surv_scaled, breaks[1:], right=False).flatten()  # shape: (n,)
     t0 = breaks[bin_idx]         # left edge of interval
     t1 = breaks[bin_idx + 1]     # right edge
@@ -372,10 +372,10 @@ def loglik_surv_piecewise(batch_data, list_type, theta, normalization_params, n_
     cdf_T, cdf_C = torch.cumsum(density_T, dim=1), torch.cumsum(density_C, dim=1)
     surv_T, surv_C = 1.0 - cdf_T, 1.0 - cdf_C
 
-    S0_T = torch.where(bin_idx == 0, torch.ones(n), surv_T[torch.arange(n), bin_idx - 1])
-    S1_T = surv_T[torch.arange(n), bin_idx]
-    S0_C = torch.where(bin_idx == 0, torch.ones(n), surv_C[torch.arange(n), bin_idx - 1])
-    S1_C = surv_C[torch.arange(n), bin_idx]
+    S0_T = torch.where(bin_idx == 0, torch.ones(n, device=data.device), surv_T[torch.arange(n, device=data.device), bin_idx - 1])
+    S1_T = surv_T[torch.arange(n, device=data.device), bin_idx]
+    S0_C = torch.where(bin_idx == 0, torch.ones(n, device=data.device), surv_C[torch.arange(n, device=data.device), bin_idx - 1])
+    S1_C = surv_C[torch.arange(n, device=data.device), bin_idx]
 
     # Linear interpolation weight
     w = (T_surv_scaled - t0) / bin_width
@@ -397,8 +397,9 @@ def loglik_surv_piecewise(batch_data, list_type, theta, normalization_params, n_
     def sample_from_density(density, intervals, data_min, data_max):
 
         batch_size = density.shape[0]
+        dev = density.device
         # Interval widths and start points
-        intervals_tensor = torch.tensor(intervals, dtype=torch.float32)  # shape: (K, 2)
+        intervals_tensor = torch.tensor(intervals, dtype=torch.float32, device=dev)  # shape: (K, 2)
         starts = intervals_tensor[:, 0]  # shape: (K,)
         widths = intervals_tensor[:, 1] - intervals_tensor[:, 0]  # shape: (K,)
 
@@ -412,7 +413,7 @@ def loglik_surv_piecewise(batch_data, list_type, theta, normalization_params, n_
         # 3. Sample uniformly within the selected intervals
         t_start = starts[interval_indices]        # (batch_size,)
         t_width = widths[interval_indices]        # (batch_size,)
-        u = torch.rand(batch_size) # (batch_size,)
+        u = torch.rand(batch_size, device=dev) # (batch_size,)
 
         samples = t_start + u * t_width           # sampled time in interval
         samples = data_min + (samples * (data_max - data_min)) / 1.0  # optional rescaling
@@ -495,15 +496,15 @@ def loglik_surv_weibull(batch_data, list_type, theta, normalization_params, n_ge
     # Compute log-likelihood
     T_surv, delta = data[:, 0], data[:, 1]
     T_surv_scaled = (T_surv - data_min) / (data_max - data_min)
-    log_p_x_T = delta * weibull.log_hazard(torch.stack([log_est_scale_T, log_est_shape_T]).T, T_surv_scaled, all_times=False) - weibull.cumulative_hazard(torch.stack([log_est_scale_T, log_est_shape_T]).T, T_surv_scaled, all_times=False)
-    log_p_x_C = (1 - delta) * weibull.log_hazard(torch.stack([log_est_scale_C, log_est_shape_C]).T, T_surv_scaled, all_times=False) - weibull.cumulative_hazard(torch.stack([log_est_scale_C, log_est_shape_C]).T, T_surv_scaled, all_times=False)
+    log_p_x_T = delta * weibull.log_hazard(torch.stack([log_est_scale_T, log_est_shape_T]).T, T_surv_scaled, respective_times=True) - weibull._cumulative_hazard(torch.stack([log_est_scale_T, log_est_shape_T]).T, T_surv_scaled, respective_times=True)
+    log_p_x_C = (1 - delta) * weibull.log_hazard(torch.stack([log_est_scale_C, log_est_shape_C]).T, T_surv_scaled, respective_times=True) - weibull._cumulative_hazard(torch.stack([log_est_scale_C, log_est_shape_C]).T, T_surv_scaled, respective_times=True)
 
     log_p_x = log_p_x_T + log_p_x_C
 
     sample_T, sample_C = [], []
     for _ in range(n_generated_dataset):
-        U = torch.rand(T_surv.shape[0]).clamp(1e-6, 1)  # Avoid log(0)
-        V = torch.rand(T_surv.shape[0]).clamp(1e-6, 1)  # Avoid log(0)
+        U = torch.rand(T_surv.shape[0], device=data.device).clamp(1e-6, 1)  # Avoid log(0)
+        V = torch.rand(T_surv.shape[0], device=data.device).clamp(1e-6, 1)  # Avoid log(0)
         T_sampled = est_scale_T * (-torch.log(U)) ** (1 / est_shape_T) * (data_max - data_min) / 1.0  + data_min
         C_sampled = est_scale_C * (-torch.log(V)) ** (1 / est_shape_C) * (data_max - data_min) / 1.0  + data_min
         sample_T.append(T_sampled)
@@ -660,9 +661,9 @@ def loglik_surv_loglog(batch_data, list_type, theta, normalization_params, n_gen
     # generate
     sample_T, sample_C = [], []
     for _ in range(n_generated_dataset):
-        
-        U = torch.rand(T_surv.shape[0]).clamp(1e-6, 1)  
-        V = torch.rand(T_surv.shape[0]).clamp(1e-6, 1)  
+
+        U = torch.rand(T_surv.shape[0], device=data.device).clamp(1e-6, 1)
+        V = torch.rand(T_surv.shape[0], device=data.device).clamp(1e-6, 1)  
         
         T_sampled_scaled = cdf_inv(U,est_scale_T,est_shapem1_T)  
         C_sampled_scaled = est_scale_C * (-torch.log(V)) ** (1 / est_shape_C)
@@ -748,8 +749,8 @@ def loglik_pos(batch_data, list_type, theta, normalization_params, n_generated_d
         "params": [est_mean, est_var],
         "log_p_x": log_p_x * missing_mask,
         "log_p_x_missing": log_p_x * (1.0 - missing_mask),
-        "samples": torch.clamp(torch.exp(Normal(est_mean, torch.sqrt(est_var)).sample(sample_shape=(n_generated_dataset, ))) , min=0, max=max_threshold)
-        #"samples": torch.clamp(torch.exp(Normal(est_mean, torch.sqrt(est_var)).sample(sample_shape=(n_generated_dataset, ))) - 1.0, min=0, max=max_threshold)
+        # Invert log1p: x = exp(y) - 1 where y ~ N(mu, var) and y = log(1+x)
+        "samples": torch.clamp(torch.exp(Normal(est_mean, torch.sqrt(est_var)).sample(sample_shape=(n_generated_dataset, ))) - 1.0, min=0, max=max_threshold)
     }
 
 
@@ -834,8 +835,8 @@ def loglik_ordinal(batch_data, list_type, theta, normalization_params, n_generat
     theta_values = torch.cumsum(torch.clamp(F.softplus(partition_param), min=epsilon, max=1e20), dim=1)
 
     sigmoid_est_mean = torch.sigmoid(theta_values - mean_value)
-    mean_probs = torch.cat([sigmoid_est_mean, torch.ones((batch_size, 1))], dim=1) - \
-                 torch.cat([torch.zeros((batch_size, 1)), sigmoid_est_mean], dim=1)
+    mean_probs = torch.cat([sigmoid_est_mean, torch.ones((batch_size, 1), device=data.device)], dim=1) - \
+                 torch.cat([torch.zeros((batch_size, 1), device=data.device), sigmoid_est_mean], dim=1)
 
     mean_probs = torch.clamp(mean_probs, min=epsilon, max=1.0)
 

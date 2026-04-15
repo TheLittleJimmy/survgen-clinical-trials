@@ -39,7 +39,28 @@ def get_args(argv = None):
     parser.add_argument('--types_file', type=str, default='mnist_train_types2.csv', help='File with the types of the data')
     parser.add_argument('--miss_file', type=str, default='Missing_test.csv', help='File with the missing indexes mask')
     parser.add_argument('--true_miss_file', type=str, help='File with the missing indexes when there are NaN in the data')
-    
+
+    # Multi-version support
+    parser.add_argument('--model_version', type=str, default=None,
+                        choices=['v0', 'v1', 'v2a', 'v3_weibull', 'v3_piecewise'],
+                        help='Model version: v0=baseline, v1=baseline+endpoint, v2a=longitudinal, v3_*=survival')
+    parser.add_argument('--endpoint_column', type=str, default=None,
+                        help='Endpoint column name (for V1)')
+    parser.add_argument('--longitudinal_file', type=str, default=None,
+                        help='CSV file with longitudinal data in long format (for V2A)')
+    parser.add_argument('--patient_id_col', type=str, default='patient_id',
+                        help='Patient ID column name in longitudinal file (for V2A)')
+    parser.add_argument('--time_col', type=str, default='visit_time',
+                        help='Visit time column name in longitudinal file (for V2A)')
+    parser.add_argument('--longitudinal_value_col', type=str, default='value',
+                        help='Longitudinal outcome value column (for V2A)')
+    parser.add_argument('--longitudinal_mask_col', type=str, default=None,
+                        help='Optional observation mask column in longitudinal file (for V2A)')
+    parser.add_argument('--time_grid', type=float, nargs='+', default=None,
+                        help='Time grid for longitudinal generation (for V2A)')
+    parser.add_argument('--use_controls_only', action='store_true', default=False,
+                        help='Use control group only')
+
     return parser.parse_args(argv)
 
 def read_data(data_file, types_file, miss_file, true_miss_file, surv_type=None):
@@ -87,7 +108,7 @@ def read_data(data_file, types_file, miss_file, true_miss_file, surv_type=None):
     if surv_type is not None:
         for i in range(len(types_dict)):
             if types_dict[i]["name"] == "survcens":
-                types_dict[i]["type"] == surv_type
+                types_dict[i]["type"] = surv_type
 
     # Read data from input file and convert to PyTorch tensor
     with open(data_file, 'r') as f:
@@ -512,12 +533,115 @@ class MyCustomDataset(Dataset):
     def __getitem__(self, idx):
         row = self.data[idx]
         # miss_row = self.miss_mask[idx]
-        
+
         # Split features
         data_list = [row[start:end] for start, end in self.feature_slices]
         # miss_list = [miss_row[start:end] for start, end in self.feature_slices]
 
         miss_list = self.miss_mask[idx, :]
-        
+
         return data_list, miss_list
+
+
+# ---------------------------------------------------------------------------
+# V2A longitudinal data preparation
+# ---------------------------------------------------------------------------
+
+def prepare_longitudinal_tensors(longitudinal_df, patient_id_col='patient_id',
+                                  time_col='visit_time', value_col='value',
+                                  mask_col=None, n_patients=None):
+    """
+    Convert long-format longitudinal data to padded tensors aligned by patient row index.
+
+    The patient IDs in *longitudinal_df[patient_id_col]* must be **0-based integer
+    indices** that correspond to row positions in the baseline data table.
+
+    Parameters
+    ----------
+    longitudinal_df : pd.DataFrame
+        Long-format repeated-measures data.
+    patient_id_col : str
+        Column with 0-based patient row indices.
+    time_col : str
+        Column with visit times.
+    value_col : str or list of str
+        Column(s) with outcome values.  When a list is provided the returned
+        *values_norm* tensor has shape ``(N, T_max, D)`` instead of ``(N, T_max)``.
+    mask_col : str or None
+        Optional column for per-visit observation mask. If None every visit is 1.
+    n_patients : int or None
+        Total number of patients (rows in baseline). Inferred from max id + 1 if None.
+
+    Returns
+    -------
+    times_norm : torch.Tensor  (N, T_max)
+        Visit times normalised to [0, 1].
+    values_norm : torch.Tensor (N, T_max) or (N, T_max, D)
+        Outcome values normalised to zero-mean unit-variance.
+    masks : torch.Tensor       (N, T_max)
+        Binary mask (1 = observed visit).
+    norm_params : dict
+        Keys: time_min, time_max, value_mean, value_std, max_visits.
+        When value_col is a list, value_mean and value_std are lists (one per outcome).
+    """
+    # Determine whether we have single or multiple outcomes
+    multi = isinstance(value_col, (list, tuple))
+    value_cols = list(value_col) if multi else [value_col]
+    n_outcomes = len(value_cols)
+
+    patient_ids = longitudinal_df[patient_id_col].values.astype(int)
+    N = n_patients if n_patients is not None else int(patient_ids.max()) + 1
+
+    grouped = longitudinal_df.groupby(patient_id_col)
+    max_visits = int(grouped.size().max())
+
+    times = torch.zeros(N, max_visits)
+    values = torch.zeros(N, max_visits, n_outcomes)
+    masks = torch.zeros(N, max_visits)
+
+    visit_count = np.zeros(N, dtype=int)
+    for _, row in longitudinal_df.iterrows():
+        pid = int(row[patient_id_col])
+        v = visit_count[pid]
+        if v < max_visits:
+            times[pid, v] = float(row[time_col])
+            for d, vc in enumerate(value_cols):
+                values[pid, v, d] = float(row[vc])
+            masks[pid, v] = float(row[mask_col]) if mask_col is not None else 1.0
+            visit_count[pid] += 1
+
+    # Normalise times to [0, 1]
+    obs_mask = masks.bool()
+    obs_times = times[obs_mask]
+    time_min = obs_times.min().item() if obs_times.numel() > 0 else 0.0
+    time_max = obs_times.max().item() if obs_times.numel() > 0 else 1.0
+    time_range = max(time_max - time_min, 1e-6)
+    times_norm = (times - time_min) / time_range * masks
+
+    # Normalise values to zero-mean unit-variance (per outcome)
+    value_means = []
+    value_stds = []
+    masks_exp = masks.unsqueeze(-1).expand_as(values)           # (N, T, D)
+    for d in range(n_outcomes):
+        obs_vals = values[:, :, d][obs_mask]
+        vmean = obs_vals.mean().item() if obs_vals.numel() > 0 else 0.0
+        vstd = max(obs_vals.std().item(), 1e-6) if obs_vals.numel() > 0 else 1.0
+        values[:, :, d] = (values[:, :, d] - vmean) / vstd
+        value_means.append(vmean)
+        value_stds.append(vstd)
+
+    values_norm = values * masks_exp
+
+    # Backward compat: squeeze last dim when single outcome
+    if not multi:
+        values_norm = values_norm.squeeze(-1)                   # (N, T)
+        value_means = value_means[0]
+        value_stds = value_stds[0]
+
+    norm_params = {
+        'time_min': time_min, 'time_max': time_max,
+        'value_mean': value_means, 'value_std': value_stds,
+        'max_visits': max_visits,
+    }
+    return times_norm, values_norm, masks, norm_params
     
