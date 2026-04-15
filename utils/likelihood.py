@@ -524,8 +524,11 @@ def loglik_surv_weibull(batch_data, list_type, theta, normalization_params, n_ge
 
 def loglik_surv_loglog(batch_data, list_type, theta, normalization_params, n_generated_dataset):
     """
-    Computes the log-likelihood for positive real-valued data using a log logistic distribution for the times and weibull distribution for the
-    censoring times.
+    Computes the log-likelihood for survival data using a log-logistic distribution
+    for both event and censoring times.
+
+    Note: sampling uses log-logistic inverse CDF for event times but Weibull
+    inverse CDF for censoring times (known inconsistency, see docs).
 
     Parameters:
     -----------

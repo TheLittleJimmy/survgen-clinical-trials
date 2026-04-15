@@ -471,7 +471,8 @@ def run(df, miss_mask, true_miss_mask, feat_types_dict,  n_generated_dataset, n_
         result = est_data_gen_transformed
 
     # V2A: also generate longitudinal trajectories
-    if model_version == 'v2a':
+    # V2A / V4: also generate longitudinal trajectories
+    if model_version in ('v2a', 'v4_joint', 'v4_seq'):
         dev = _get_device(device)
         with torch.no_grad():
             if time_grid is not None:
@@ -503,7 +504,33 @@ def run(df, miss_mask, true_miss_mask, feat_types_dict,  n_generated_dataset, n_
                                            device=X.device, dtype=X.dtype)
             X = torch.cat([X, long_summary], dim=1)
             _, samples = model_hivae.encode(X, tau=1e-3)
-            mu, var, trajectories = model_hivae.generate_longitudinal(samples, tg, n_samples=n_generated_dataset)
+
+            # V4_seq: sequential generation order
+            if model_version == 'v4_seq':
+                # 1. Generate baseline X (already in result from prior generation)
+                # 2. Compute c_X from baseline data
+                c_X = model_hivae.baseline_summary_net(
+                    torch.cat(X_list, dim=1))
+                # 3. Generate planned longitudinal trajectory conditioned on c_X
+                mu, var, trajectories = model_hivae.generate_longitudinal_seq(
+                    samples, tg, c_X, n_samples=n_generated_dataset)
+                # 4. Compute r_Y from planned trajectory (full grid, all-ones mask)
+                planned_values = mu  # (B, T, D) — use mean as planned trajectory
+                planned_times = tg.unsqueeze(0).expand(n_gen, -1)  # (B, T)
+                planned_masks = torch.ones(n_gen, tg.shape[0], device=dev)
+                r_Y = model_hivae._encode_longitudinal_summary(
+                    (planned_times, planned_values.squeeze(-1) if planned_values.shape[-1] == 1 else planned_values,
+                     planned_masks))
+                samples['c_X'] = c_X
+                samples['r_Y'] = r_Y
+                # Steps 5-6 (survival generation + truncation) happen in the
+                # baseline result which already includes survival features.
+                # The truncation of Y after t would be a post-processing step
+                # applied by the caller using the generated survival times.
+            else:
+                mu, var, trajectories = model_hivae.generate_longitudinal(
+                    samples, tg, n_samples=n_generated_dataset)
+
         return result, {"mu": mu.cpu(), "var": var.cpu(), "trajectories": trajectories.cpu(), "time_grid": tg.cpu()}
 
     return result

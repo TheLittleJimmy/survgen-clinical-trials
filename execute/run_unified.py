@@ -78,7 +78,8 @@ def parse_args():
 
     # ---- required ----
     p.add_argument("--model_version", type=str, required=True,
-                    choices=["v0", "v1", "v2a", "v3_weibull", "v3_piecewise"],
+                    choices=["v0", "v1", "v2a", "v3_weibull", "v3_piecewise",
+                             "v4_joint", "v4_seq"],
                     help="Model version to train and generate from.")
     p.add_argument("--data_file", type=str, required=True,
                     help="Path to the baseline / full data CSV.")
@@ -131,6 +132,11 @@ def parse_args():
     # ---- misc ----
     p.add_argument("--use_controls_only", action="store_true", default=False)
 
+    # ---- V4 ----
+    p.add_argument("--surv_type", type=str, default="weibull",
+                    choices=["weibull", "piecewise"],
+                    help="Survival family for V4 models (default: weibull).")
+
     return p.parse_args()
 
 
@@ -146,6 +152,8 @@ def main():
         surv_type = "surv_weibull"
     elif args.model_version == "v3_piecewise":
         surv_type = "surv_piecewise"
+    elif args.model_version in ("v4_joint", "v4_seq"):
+        surv_type = "surv_weibull" if args.surv_type == "weibull" else "surv_piecewise"
 
     df, types_dict, miss_mask, true_miss_mask, n_samples = data_processing.read_data(
         args.data_file, args.types_file, args.miss_file, args.true_miss_file,
@@ -167,8 +175,8 @@ def main():
                   f"but model_version={args.model_version}. They will be modelled as-is.")
     if args.model_version == "v1" and args.endpoint_column:
         print(f"[run_unified] V1 endpoint column: {args.endpoint_column}")
-    if args.model_version == "v2a" and args.longitudinal_file is None:
-        raise ValueError("V2A requires --longitudinal_file")
+    if args.model_version in ("v2a", "v4_joint", "v4_seq") and args.longitudinal_file is None:
+        raise ValueError(f"{args.model_version} requires --longitudinal_file")
 
     # ------------------------------------------------------------------
     # 3. V2A: load longitudinal data
@@ -176,7 +184,7 @@ def main():
     longitudinal_data = None
     long_norm_params = None
     n_long_outcomes = 1
-    if args.model_version == "v2a" and args.longitudinal_file is not None:
+    if args.model_version in ("v2a", "v4_joint", "v4_seq") and args.longitudinal_file is not None:
         long_df = pd.read_csv(args.longitudinal_file)
         long_value_cols = args.longitudinal_value_col if args.longitudinal_value_col is not None else ["value"]
         n_long_outcomes = len(long_value_cols)
@@ -208,7 +216,8 @@ def main():
         "y_dim": args.y_dim,
         "s_dim": args.s_dim,
     }
-    if args.model_version == "v3_piecewise":
+    if args.model_version == "v3_piecewise" or \
+       (args.model_version in ("v4_joint", "v4_seq") and args.surv_type == "piecewise"):
         params["n_layers_surv_piecewise"] = args.n_layers_surv_piecewise
         params["n_intervals"] = args.n_intervals
 
@@ -234,7 +243,7 @@ def main():
     # ------------------------------------------------------------------
     os.makedirs(args.output_dir, exist_ok=True)
 
-    if args.model_version == "v2a":
+    if args.model_version in ("v2a", "v4_joint", "v4_seq"):
         # result is (baseline_tensor, longitudinal_dict)
         baseline_result, long_result = result
 
