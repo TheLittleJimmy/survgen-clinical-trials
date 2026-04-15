@@ -40,7 +40,7 @@ The versions differ in **which observation likelihoods are active** and, for V2A
 | V3_weibull | $P(X, t, \delta)$ | Weibull survival likelihood |
 | V3_piecewise | $P(X, t, \delta)$ | Piecewise-constant survival likelihood |
 
-> **Implementation note on V2A:** In the current codebase (`src.py`), the V2A-specific layer initialization block (time embedding, longitudinal decoder, summary encoder, and augmented encoder layers) is placed after the `return` statement in `get_theta_view()` inside `HIVAE.__init__`, making it **dead code**. The V2A layers are never instantiated during `__init__`, and any attempt to run V2A will raise an `AttributeError` at runtime. The methods `_encode_longitudinal_summary`, `compute_longitudinal_log_lik`, and `generate_longitudinal` exist and are architecturally correct, but they reference attributes (`self.time_embed`, `self.longitudinal_mu`, etc.) that are never created. The forward pass in `HIVAE.forward()` and the training/generation code in `surv_hivae.py` do have correct V2A branching logic. **To enable V2A, the initialization block must be moved above `get_theta_view()` within `__init__`.** The documentation below describes V2A as *designed* (i.e., what the code intends to implement once the init ordering is fixed).
+> **Implementation note on V2A:** In the current codebase (`src.py`), the V2A-specific layer initialization block (time embedding, longitudinal decoder, summary encoder, and augmented encoder layers) is placed at the end of `HIVAE.__init__`, **after** the theta-layer construction and **before** `get_theta_view()` is ever called. When `model_version='v2a'`, the V2A layers are properly instantiated and the encoder layers (`s_layer`, `z_layer`) are re-created with the augmented input dimension (`input_dim + long_summary_dim`). All V2A methods (`_encode_longitudinal_summary`, `compute_longitudinal_log_lik`, `generate_longitudinal`) are fully functional. The forward pass in `HIVAE.forward()` and the training/generation code in `surv_hivae.py` have correct V2A branching logic.
 
 ---
 
@@ -168,25 +168,23 @@ where $f_j$ is a feature-type-specific neural network.
 
 **Observed / missing split (inherited implementation detail):** During theta estimation, the data is partitioned into observed ($m_j = 1$) and missing ($m_j = 0$) subsets. The theta layers are applied to both subsets, but the missing-data forward pass uses `torch.no_grad()` so that parameter gradients are computed only from observed entries. This is a legacy design choice inherited from the original HI-VAE codebase. An alternative approach — running a normal forward pass on all entries and masking the loss — would be mathematically equivalent for the loss gradient but differs in that the current approach also prevents any indirect gradient flow through the theta-layer outputs for missing entries. The current behavior is retained for compatibility with the original implementation.
 
-| Feature Type | Parameters | Network |
-|---|---|---|
-| real | $\mu,\, \sigma^2$ | $\mu$: `Linear(d_y^{(j)} + K, 1)`, $\sigma$: `Linear(K, 1)` |
-| pos | $\mu,\, \sigma^2$ | $\mu$: `Linear(d_y^{(j)} + K, 1)`, $\sigma$: `Linear(K, 1)` |
-| count | $\lambda$ | `Linear(d_y^{(j)} + K, 1)` |
-| cat | logits $\pi_{1..C-1}$ | `Linear(d_y^{(j)} + K, C-1)` |
-| ordinal | thresholds $\theta_{1..C-1}$, $\mu$ | $\theta$: `Linear(K, C-1)`, $\mu$: `Linear(d_y^{(j)} + K, 1)` |
-| surv | $\mu_T, \sigma_T, \mu_C, \sigma_C$ | $\mu_{T/C}$: `Linear(d_y^{(j)} + K, 1)`, $\sigma_{T/C}$: `Linear(K, 1)` |
-| surv_weibull | $k_T, \lambda_T, k_C, \lambda_C$ | Single `Linear(d_y^{(j)} + K, 4)` |
-| surv_loglog | $\beta_T{-}1, \alpha_T, \beta_C{-}1, \alpha_C$ | Single `Linear(d_y^{(j)} + K, 4)` |
-| surv_piecewise | $\text{mass}_T$, $\text{mass}_C$ (per interval) | 1-layer or 2-layer MLP per component |
+| Feature Type | Parameters | Network | Status |
+|---|---|---|---|
+| real | $\mu,\, \sigma^2$ | $\mu$: `Linear(d_y^{(j)} + K, 1)`, $\sigma$: `Linear(K, 1)` | primary |
+| pos | $\mu,\, \sigma^2$ | $\mu$: `Linear(d_y^{(j)} + K, 1)`, $\sigma$: `Linear(K, 1)` | primary |
+| count | $\lambda$ | `Linear(d_y^{(j)} + K, 1)` | primary |
+| cat | logits $\pi_{1..C-1}$ | `Linear(d_y^{(j)} + K, C-1)` | primary |
+| ordinal | thresholds $\theta_{1..C-1}$, $\mu$ | $\theta$: `Linear(K, C-1)`, $\mu$: `Linear(d_y^{(j)} + K, 1)` | primary |
+| **surv_weibull** | $k_T, \lambda_T, k_C, \lambda_C$ | Single `Linear(d_y^{(j)} + K, 4)` | **primary** |
+| **surv_piecewise** | $\text{mass}_T$, $\text{mass}_C$ (per interval) | 1-layer or 2-layer MLP per component | **primary** |
+| surv | $\mu_T, \sigma_T, \mu_C, \sigma_C$ | $\mu_{T/C}$: `Linear(d_y^{(j)} + K, 1)`, $\sigma_{T/C}$: `Linear(K, 1)` | *secondary* |
+| surv_loglog | $\beta_T{-}1, \alpha_T, \beta_C{-}1, \alpha_C$ | Single `Linear(d_y^{(j)} + K, 4)` | *secondary* |
 
 All theta-layer linear layers are **bias-free** (`bias=False`).
 
-**Additional survival heads in the codebase:** Beyond the primary `surv_weibull` and `surv_piecewise` families, the repo contains:
-- `surv` (log-normal): Independent log-normal for event and censoring times, using hazard-based log-likelihood with `Normal` distribution hazard/cumulative hazard.
-- `surv_loglog` (log-logistic for event, log-logistic for censoring): Uses the parameterisation $\beta = \beta_{-1} + 1$ (shape) and $\alpha$ (scale).
-
-These are functional but are **not** exposed through the `--model_version` argument. They remain available by setting the corresponding type in `data_types.csv`.
+**Survival head tiers:**
+- **Primary (mainline model family):** `surv_weibull` and `surv_piecewise` — mathematically clean, exposed via `--model_version v3_weibull` / `v3_piecewise`, validated.
+- **Secondary (experimental):** `surv` (log-normal) and `surv_loglog` (log-logistic) — available by setting the type in `data_types.csv`, but **not** exposed through `--model_version`. These have known mathematical limitations documented in Sections 5.6 and 5.8.
 
 ---
 
@@ -312,9 +310,11 @@ $$\log p(x_j = k) = \log\bigl(P(x_j = k)\bigr), \quad \text{clamped to } [10^{-6
 
 $$x_j \sim \mathrm{Categorical}\bigl(P(x_j = k)\bigr) \qquad \text{then thermometer encoded}$$
 
-### 5.6 Survival: Log-Normal (`surv`)
+### 5.6 Survival: Log-Normal (`surv`) — *secondary / experimental*
 
-The `surv` type models independent latent event time $T^*$ and censoring time $C$ using **log-normal** distributions (via `Normal` hazard functions). Only the observed pair $(t, \delta)$ is used.
+> **Status:** This head is **not** part of the validated mainline model family. It is available in code via `data_types.csv` but is **not** exposed through `--model_version`. Use with caution.
+
+The `surv` type models independent latent event time $T^*$ and censoring time $C$ using **log-normal** distributions (via `Normal` hazard functions on the log1p-transformed time). Only the observed pair $(t, \delta)$ is used.
 
 **Normalization:** log1p-transform then z-score on observed data within the current batch (same as `pos` type).
 
@@ -337,6 +337,8 @@ $$\log h(t_{\log};\, \mu,\, \sigma) = \log\!\left(\frac{\phi\!\left(\frac{t_{\lo
 $$H(t_{\log};\, \mu,\, \sigma) = -\log\!\left(1 - \Phi\!\left(\frac{t_{\log} - \mu}{\sigma}\right)\right)$$
 
 $$\log p(t, \delta) = \delta \cdot \log h_T(t_{\log}) + (1-\delta) \cdot \log h_C(t_{\log}) - H_T(t_{\log}) - H_C(t_{\log})$$
+
+> **Known limitation:** The log-likelihood above operates on the transformed scale $t_{\log} = \log(1+t)$ but does **not** include the change-of-variable Jacobian $-\log(1+t)$ that would be needed for a proper density on the original time scale. As a result, the training objective is not a mathematically correct log-density of the observed time. The sampling procedure (below) is internally consistent: it draws from Normal and inverts via `exp()-1`. This scale mismatch between likelihood and density is one reason this head remains secondary/experimental.
 
 **Sampling:**
 
@@ -386,9 +388,11 @@ $$t = \min(T^*_{\text{scaled}},\, C_{\text{scaled}}) \cdot (t_{\max} - t_{\min})
 
 $$\delta = \mathbf{1}\{T^*_{\text{scaled}} \le C_{\text{scaled}}\}$$
 
-### 5.8 Survival: Log-Logistic (`surv_loglog`)
+### 5.8 Survival: Log-Logistic (`surv_loglog`) — *secondary / experimental*
 
-The `surv_loglog` type models the event time $T^*$ with a **log-logistic** distribution and the censoring time $C$ also with a **log-logistic** distribution. This head uses the same `Linear(d_y^{(j)} + K, 4)` architecture as Weibull.
+> **Status:** This head is **not** part of the validated mainline model family. It is available in code via `data_types.csv` but is **not** exposed through `--model_version`. Use with caution.
+
+The `surv_loglog` type models both event time $T^*$ and censoring time $C$ with **log-logistic** distributions for the likelihood. This head uses the same `Linear(d_y^{(j)} + K, 4)` architecture as Weibull.
 
 **Normalization:** Min-max scaling of observed times to $[0, 1]$.
 
@@ -410,11 +414,15 @@ $$\log p(t, \delta) = \delta \cdot \log h_T(t_{\text{scaled}}) + (1-\delta) \cdo
 
 **Sampling:**
 
-$$U \sim \mathrm{Uniform}(0,1), \qquad T^*_{\text{scaled}} = \alpha_T \cdot \left(\frac{1-U}{U}\right)^{1/\beta_T}$$
+$$U \sim \mathrm{Uniform}(0,1), \qquad T^*_{\text{scaled}} = \alpha_T \cdot \left(\frac{1-U}{U}\right)^{1/\beta_T} \quad \text{(log-logistic inverse CDF)}$$
 
-$$V \sim \mathrm{Uniform}(0,1), \qquad C_{\text{scaled}} = \alpha_C \cdot (-\log V)^{1/\beta_C} \quad \text{(Weibull inverse CDF for censoring)}$$
+$$V \sim \mathrm{Uniform}(0,1), \qquad C_{\text{scaled}} = \alpha_C \cdot (-\log V)^{1/\beta_{C,-1}} \quad \text{(Weibull inverse CDF, using raw parameter without $+1$)}$$
 
-> **Note:** The censoring sampling uses Weibull inverse CDF even though the censoring likelihood uses log-logistic. This is an asymmetry in the current implementation.
+> **Known inconsistencies:** The censoring component has two compounding mismatches:
+> 1. **Distribution mismatch:** The censoring **likelihood** uses log-logistic $h_C / H_C$, but the censoring **sampling** uses Weibull inverse CDF.
+> 2. **Parameter offset mismatch:** In the likelihood, the raw network output for censoring shape is passed through `shapem1 + 1` to obtain $\beta_C$ (matching the event-time convention). In the sampling code, the same raw output is used directly as the Weibull shape exponent **without** the $+1$ offset. So the sampling shape is $\beta_{C,-1}$, not $\beta_C$.
+>
+> The event time likelihood and sampling are both consistently log-logistic with the $+1$ offset applied in both paths. These mismatches are implementation artifacts and are reasons this head remains secondary/experimental.
 
 $$t = \min(T^*_{\text{scaled}},\, C_{\text{scaled}}) \cdot (t_{\max} - t_{\min}) + t_{\min}$$
 
@@ -514,7 +522,7 @@ The model minimises `neg_ELBO_loss` $= -\mathrm{ELBO}$.
 
 **Target distribution:**
 
-$$P(X_{\text{pre}}) = \int_s \int_z \left[\prod_j p(x_j \mid \theta_j(y(z), s))\right] p(z \mid s)\, p(s)\, dz$$
+$$P(X_{\text{pre}}) = \sum_s \int_z \left[\prod_j p(x_j \mid \theta_j(y(z), s))\right] p(z \mid s)\, p(s)\, dz$$
 
 where $j$ ranges over **baseline/pre-randomization variables only** (real, pos, count, cat, ordinal types).
 
@@ -528,7 +536,7 @@ $$\mathrm{ELBO}_{\text{v0}} = \mathbb{E}_q\!\left[\sum_{j \in \text{baseline}} \
 
 V1 jointly models baseline variables $X_{\text{pre}}$ and a single continuous post-randomization endpoint $U$. The joint model is:
 
-$$P(X_{\text{pre}}, U) = \int_s \int_z \left[\prod_j p(x_j \mid \theta_j) \cdot p(U \mid \theta_U(y, s))\right] p(z \mid s)\, p(s)\, dz$$
+$$P(X_{\text{pre}}, U) = \sum_s \int_z \left[\prod_j p(x_j \mid \theta_j) \cdot p(U \mid \theta_U(y, s))\right] p(z \mid s)\, p(s)\, dz$$
 
 Because both $X_{\text{pre}}$ and $U$ are generated from the same latent $(s, z)$, the model implicitly captures $P(U \mid X_{\text{pre}})$ through the shared latent structure.
 
@@ -548,11 +556,9 @@ $$\mathrm{ELBO}_{\text{v1}} = \mathbb{E}_q\!\left[\sum_{j \in \text{baseline}} \
 
 ### 7.3 V2A: Longitudinal HI-VAE
 
-> **Implementation status:** See the note in Section 1. The V2A layers are currently dead code due to incorrect placement in `__init__`. The design below describes the *intended* architecture.
-
 V2A extends the model to repeated continuous measurements over time per patient. The target distribution factorises the longitudinal outcomes conditionally on the shared patient latent:
 
-$$P(X_{\text{pre}}, Y_{1:n_i}) = \int_s \int_z \left[\prod_j p(x_j \mid \theta_j) \cdot \prod_{v=1}^{n_i} p(y_{iv} \mid z, s, t_{iv})\right] p(z \mid s)\, p(s)\, dz$$
+$$P(X_{\text{pre}}, Y_{1:n_i}) = \sum_s \int_z \left[\prod_j p(x_j \mid \theta_j) \cdot \prod_{v=1}^{n_i} p(y_{iv} \mid z, s, t_{iv})\right] p(z \mid s)\, p(s)\, dz$$
 
 **Key design:** One patient-level latent $(s, z)$ shared across all visits. Trajectory shape is captured through a time-conditioned decoder, **not** autoregressive recurrence.
 
@@ -651,7 +657,7 @@ V3 jointly models baseline covariates $X$ and a survival outcome. The observed s
 
 **Target distribution:**
 
-$$P(X, t, \delta) = \int_s \int_z \left[\prod_j p(x_j \mid \theta_j) \cdot p(t, \delta \mid \theta_{\text{surv}}(y, s))\right] p(z \mid s)\, p(s)\, dz$$
+$$P(X, t, \delta) = \sum_s \int_z \left[\prod_j p(x_j \mid \theta_j) \cdot p(t, \delta \mid \theta_{\text{surv}}(y, s))\right] p(z \mid s)\, p(s)\, dz$$
 
 The survival likelihood family is selected by the feature type in `data_types.csv`:
 
@@ -720,11 +726,11 @@ $$\mathrm{ELBO}_{\text{v3}} = \mathbb{E}_q\!\left[\sum_{j \in \text{baseline}} \
 
 Both latent event and censoring times are sampled independently from their respective models, then combined into the observed pair:
 
-$$T^* \sim \text{event distribution (Weibull, log-normal, log-logistic, or piecewise)}$$
-
-$$C \sim \text{censoring distribution}$$
+$$T^* \sim \text{event distribution}, \qquad C \sim \text{censoring distribution}$$
 
 $$t = \min(T^*, C), \qquad \delta = \mathbf{1}\{T^* \le C\}$$
+
+For the **primary** survival heads (Weibull, piecewise-constant), the sampling distributions match the training likelihoods exactly. For the **secondary** heads (`surv`, `surv_loglog`), see the caveats noted in Sections 5.6 and 5.8.
 
 ### Conditional generation (existing, for survival versions)
 
@@ -831,4 +837,4 @@ where $D_{\text{out}} = $ `n_long_outcomes` (default 1).
 
 ---
 
-*This document describes the model as implemented in the `survgen-clinical-trials` repository with the multi-version extension (v0/v1/v2a/v3). Last updated: 2026-04-14.*
+*This document describes the model as implemented in the `survgen-clinical-trials` repository with the multi-version extension (v0/v1/v2a/v3). The validated mainline model family is: V0, V1, V2A, V3\_weibull, V3\_piecewise. Last updated: 2026-04-15.*
