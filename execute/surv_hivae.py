@@ -137,8 +137,20 @@ def train_HIVAE(vae_model, data, miss_mask, true_miss_mask, feat_types_dict, bat
             # Compute loss
             optimizer.zero_grad()
             vae_res = vae_model.forward(data_list_observed, data_list, miss_list, tau, n_generated_dataset=1, longitudinal_data=batch_long)
-            vae_res["neg_ELBO_loss"].backward()
+            loss = vae_res["neg_ELBO_loss"]
+            if torch.isnan(loss) or torch.isinf(loss):
+                continue
+            # Clamp loss to avoid extreme gradients
+            loss = loss.clamp(max=1e4)
+            # Save state before update in case of NaN
+            state_before = {k: v.clone() for k, v in vae_model.state_dict().items()}
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(vae_model.parameters(), max_norm=1.0)
             optimizer.step()
+            # Revert if NaN in weights
+            if any(torch.isnan(p).any() for p in vae_model.parameters()):
+                vae_model.load_state_dict(state_before)
+                continue
 
             avg_loss += vae_res["neg_ELBO_loss"].item() / n_batches_train
             avg_KL_s += torch.mean(vae_res["KL_s"]).item() / n_batches_train

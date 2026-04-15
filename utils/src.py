@@ -152,10 +152,15 @@ class HIVAE(nn.Module):
         if model_version == 'v4_seq':
             baseline_summary_dim = 16
             self.baseline_summary_dim = baseline_summary_dim
-            # Compute baseline (non-survival) input dimension
+            # Compute baseline (non-survival) input dimension after encoding
+            # (categoricals expand to nclass columns via one-hot)
             baseline_input_dim = 0
             for feat in self.feat_types_list:
-                if not feat['type'].startswith('surv'):
+                if feat['type'].startswith('surv'):
+                    continue
+                if feat['type'] in ['cat', 'ordinal']:
+                    baseline_input_dim += int(feat.get('nclass', feat.get('dim', 1)))
+                else:
                     baseline_input_dim += int(feat.get('dim', 1))
             if baseline_input_dim == 0:
                 baseline_input_dim = input_dim  # fallback
@@ -212,6 +217,20 @@ class HIVAE(nn.Module):
                         'mean_C': nn.Linear(feat_y_dim + s_dim + surv_extra_dim, 1, bias=False),
                         'sigma_C': nn.Linear(s_dim, 1, bias=False),
                     })
+
+            # Initialize V4_seq-specific layers with small weights for stability
+            with torch.no_grad():
+                for layer in [self.baseline_summary_net[0], self.baseline_summary_net[2]]:
+                    layer.weight.mul_(0.1)
+                    if layer.bias is not None:
+                        layer.bias.zero_()
+                self.longitudinal_mu_seq.weight.mul_(0.1)
+                # Scale down augmented survival theta layers
+                for i_f, feat in enumerate(self.feat_types_list):
+                    key = "feat_" + str(i_f)
+                    if feat['type'].startswith('surv') and key in self.theta_layer:
+                        for param_name, param in self.theta_layer[key].named_parameters():
+                            param.mul_(0.01)
 
     def get_theta_view(self):
         """Return a dict-like view of theta_layer that includes non-module metadata (intervals)."""
@@ -286,16 +305,16 @@ class HIVAE(nn.Module):
                 samples, batch_data, batch_miss, normalization_params,
                 n_generated_dataset, skip_surv=True)
             # Compute c_X from reconstructed baseline features
-            # Concatenate all non-survival decoded features to form X_decoded
+            # Concatenate all non-survival batch_data (already in encoded form)
             X_decoded_parts = []
             for idx_f, feat in enumerate(self.feat_types_list):
                 if not feat['type'].startswith('surv'):
-                    # Use the generated sample from decode
                     X_decoded_parts.append(batch_data[idx_f])
             if X_decoded_parts:
                 X_decoded = torch.cat(X_decoded_parts, dim=1)
             else:
-                X_decoded = torch.cat(X_list, dim=1)
+                X_decoded = torch.zeros(batch_data[0].shape[0], self._baseline_input_dim,
+                                       device=batch_data[0].device)
             c_X = self.baseline_summary_net(X_decoded).detach()  # detach to prevent gradient leakage
             samples['c_X'] = c_X
 
