@@ -169,3 +169,83 @@ The V4 remediation loop exposed that while the **architecture and engineering** 
 
 The Multi-Version HI-VAE is a variational autoencoder framework for heterogeneous clinical trial data synthesis. V4_joint jointly generates baseline covariates, longitudinal trajectories, and survival outcomes from a shared discrete-continuous latent space (s, z), combining V2A's time-conditioned Gaussian decoder with V3's Weibull survival head. V4_seq adds sequential conditional structure where longitudinal generation conditions on a baseline summary c_X, and survival generation conditions on both c_X and a longitudinal summary r_Y, with explicit leakage prevention via pre-event masking and a planned-trajectory generation order. Engineering remediation includes frozen global normalization, Weibull epsilon clamping, post-generation longitudinal truncation, and gradient stability controls.
 
+
+---
+
+## Round 3 (2026-04-16, new loop)
+
+### Actions Taken
+1. Trained V4_joint and V4_seq with improved hyperparameters (z_dim=30, y_dim=20, s_dim=25, lr=3e-4, epochs=500)
+2. Generated 28 quality visualization figures in 6 organized folders
+3. Multi-seed stability analysis (3 seeds × 2 models)
+
+### Results
+
+**Improved hyperparameters**: V4_joint loss=113.96, V4_seq loss=112.93
+
+**Multi-seed stability (with improved hyperparams)**:
+
+| Seed | V4_joint p(treat_syn) | V4_joint ER | V4_seq p(treat_syn) | V4_seq ER |
+|------|----------------------|-------------|---------------------|-----------|
+| 1 | 0.4382 | 0.468 | 0.0038 | 0.565 |
+| 42 | 0.2827 | 0.377 | 0.0014 | 0.558 |
+| 123 | 0.6966 | 0.403 | 0.0285 | 0.526 |
+
+**Key observation**: V4_seq is now consistently significant (all p<0.05) for the treatment comparison, while V4_joint is consistently non-significant. This suggests V4_seq better captures the survival distribution shape through its sequential conditioning, even though KS statistics remain high.
+
+Real event rate = 0.448. V4_joint underestimates (0.377-0.468), V4_seq overestimates (0.526-0.565).
+
+**28 figures generated** across 6 folders:
+- 01_marginals/: continuous (with KS tests) + categorical distributions
+- 02_joint_structure/: correlation heatmaps + pairwise scatter plots
+- 03_survival/: KM curves, time distributions, QQ plots, event rates, replacement analysis
+- 04_longitudinal/: 6 continuous outcome trajectories per model
+- 05_multi_seed/: stability plots across 3 seeds
+- 06_summary/: comprehensive dashboard
+
+
+### Assessment (Round 3)
+- Score: 5/10 (research prototype) / 2/10 (clinical-ready)
+- Verdict: Not ready — survival calibration still the blocker
+- Key findings from reviewer:
+  - V4_seq is the better architecture — worth continuing
+  - V4_joint should be deprioritized
+  - Weibull head is too restrictive for small clinical datasets
+  - Need to replace/expand survival head (piecewise, discrete-time, mixture)
+  - Need censoring validation, HR/RMST evaluation, memorization diagnostics
+  - P-values alone are insufficient for clinical evaluation
+
+### Reviewer Raw Response
+
+<details>
+<summary>Click to expand full reviewer response</summary>
+
+Score: 5/10 as research prototype. 2/10 for clinical-trial-ready synthetic control generation.
+
+Critical Weaknesses:
+1. Survival calibration not acceptable (KS~0.86-0.96, event rate mismatch)
+2. V4_seq significance may be artifact of distorted risk
+3. V4_joint not viable in current form
+4. Need HR, CI, RMST, KM overlap — not just p-values
+5. Weibull head too restrictive
+6. Small sample overfitting risk
+7. Censoring needs explicit validation
+8. Longitudinal-to-survival conditioning needs causal clarification
+
+Minimum Fixes:
+1. Replace/expand survival head (piecewise, discrete-time, mixture)
+2. Model censoring separately and validate
+3. Add hard survival acceptance criteria (KM bootstrap bands, Brier score, Wasserstein)
+4. Evaluate treatment effect beyond p-values (HR, RMST, CI)
+5. Held-out and bootstrap validation
+6. Memorization/privacy diagnostics
+7. Decide the estimand
+
+</details>
+
+### Status
+- Round 3 complete. Key recommendation: **replace Weibull survival head** with piecewise-constant or discrete-time alternative.
+- V4_seq architecture is validated (leakage-free, stable treatment effect direction) — continue with improved survival component.
+- V4_joint deprioritized.
+- Survival calibration (KS, event rate, HR) is the single biggest blocker.
+
