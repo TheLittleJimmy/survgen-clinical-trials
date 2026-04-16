@@ -645,3 +645,175 @@ def prepare_longitudinal_tensors(longitudinal_df, patient_id_col='patient_id',
     }
     return times_norm, values_norm, masks, norm_params
     
+
+# ======================================================================
+# Phase 1: Frozen global normalization (replaces per-batch normalization)
+# ======================================================================
+
+def compute_global_normalization(data_tensor, feat_types_list, miss_mask):
+    """Compute normalization statistics once from the full training set.
+
+    Parameters
+    ----------
+    data_tensor : torch.Tensor
+        Full training data (N, D_encoded) after read_data encoding.
+    feat_types_list : list of dict
+        Feature type specifications.
+    miss_mask : torch.Tensor
+        Combined missing mask (N, n_features).
+
+    Returns
+    -------
+    global_norm_params : list of tuples
+        One (param1, param2) per feature, same format as batch_normalization.
+    """
+    # We need to split data into per-feature tensors the same way next_batch does
+    feat_idx = 0
+    global_norm_params = []
+    for i, feature in enumerate(feat_types_list):
+        ftype = feature['type']
+        if ftype in ['cat', 'ordinal']:
+            n_cols = int(feature.get('nclass', feature.get('dim', 1)))
+        elif ftype in ['surv', 'surv_weibull', 'surv_loglog', 'surv_piecewise']:
+            n_cols = 2
+        else:
+            n_cols = int(feature.get('dim', 1))
+
+        feat_data = data_tensor[:, feat_idx:feat_idx + n_cols]
+        observed_mask = miss_mask[:, i] == 1
+        observed_data = feat_data[observed_mask]
+
+        if ftype == 'real':
+            if observed_data.numel() > 0:
+                data_var, data_mean = torch.var_mean(observed_data, unbiased=False)
+                data_var = torch.clamp(data_var, min=1e-6, max=1e20)
+            else:
+                data_mean, data_var = torch.tensor(0.0), torch.tensor(1.0)
+            global_norm_params.append((data_mean, data_var))
+
+        elif ftype == 'pos':
+            if observed_data.numel() > 0:
+                obs_log = torch.log1p(observed_data)
+                data_var, data_mean = torch.var_mean(obs_log, unbiased=False)
+                data_var = torch.clamp(data_var, min=1e-6, max=1e20)
+            else:
+                data_mean, data_var = torch.tensor(0.0), torch.tensor(1.0)
+            global_norm_params.append((data_mean, data_var))
+
+        elif ftype == 'count':
+            global_norm_params.append((0.0, 1.0))
+
+        elif ftype == 'surv':
+            if observed_data.numel() > 0:
+                obs_log = torch.log1p(observed_data[:, 0])
+                data_var, data_mean = torch.var_mean(obs_log, unbiased=False)
+                data_var = torch.clamp(data_var, min=1e-6, max=1e20)
+            else:
+                data_mean, data_var = torch.tensor(0.0), torch.tensor(1.0)
+            global_norm_params.append((data_mean, data_var))
+
+        elif ftype in ('surv_weibull', 'surv_loglog', 'surv_piecewise'):
+            if observed_data.numel() > 0:
+                data_min = torch.min(observed_data[:, 0]) - 1e-3
+                data_max = torch.max(observed_data[:, 0])
+            else:
+                data_min, data_max = torch.tensor(0.0), torch.tensor(1.0)
+            global_norm_params.append((data_min, data_max))
+
+        else:
+            global_norm_params.append((0.0, 1.0))
+
+        feat_idx += n_cols
+
+    return global_norm_params
+
+
+def batch_normalization_frozen(batch_data_list, feat_types_list, miss_list,
+                                global_norm_params):
+    """Apply normalization using frozen global statistics.
+
+    Same interface as batch_normalization() but uses precomputed stats
+    instead of computing per-batch statistics.
+
+    Parameters
+    ----------
+    batch_data_list : list of torch.Tensor
+    feat_types_list : list of dict
+    miss_list : torch.Tensor
+    global_norm_params : list of tuples from compute_global_normalization()
+
+    Returns
+    -------
+    normalized_data : list of torch.Tensor
+    normalization_parameters : list of tuples (same as global_norm_params)
+    """
+    normalized_data = []
+
+    for i, d in enumerate(batch_data_list):
+        missing_mask = miss_list[:, i] == 0
+        observed_data = d[~missing_mask]
+        feature_type = feat_types_list[i]['type']
+        params = global_norm_params[i]
+
+        if feature_type == 'real':
+            data_mean, data_var = params
+            if isinstance(data_mean, (int, float)):
+                data_mean = torch.tensor(data_mean, device=d.device, dtype=d.dtype)
+                data_var = torch.tensor(data_var, device=d.device, dtype=d.dtype)
+            else:
+                data_mean = data_mean.to(d.device)
+                data_var = data_var.to(d.device)
+            normalized_d = torch.zeros_like(d)
+            if observed_data.numel() > 0:
+                normalized_d[~missing_mask] = (observed_data - data_mean) / torch.sqrt(data_var)
+
+        elif feature_type == 'pos':
+            data_mean, data_var = params
+            if isinstance(data_mean, (int, float)):
+                data_mean = torch.tensor(data_mean, device=d.device, dtype=d.dtype)
+                data_var = torch.tensor(data_var, device=d.device, dtype=d.dtype)
+            else:
+                data_mean = data_mean.to(d.device)
+                data_var = data_var.to(d.device)
+            normalized_d = torch.zeros_like(d)
+            if observed_data.numel() > 0:
+                obs_log = torch.log1p(observed_data)
+                normalized_d[~missing_mask] = (obs_log - data_mean) / torch.sqrt(data_var)
+
+        elif feature_type == 'count':
+            normalized_d = torch.zeros_like(d)
+            if observed_data.numel() > 0:
+                normalized_d[~missing_mask] = torch.log1p(observed_data)
+
+        elif feature_type == 'surv':
+            data_mean, data_var = params
+            if isinstance(data_mean, (int, float)):
+                data_mean = torch.tensor(data_mean, device=d.device, dtype=d.dtype)
+                data_var = torch.tensor(data_var, device=d.device, dtype=d.dtype)
+            else:
+                data_mean = data_mean.to(d.device)
+                data_var = data_var.to(d.device)
+            normalized_d = torch.zeros_like(d)
+            if observed_data.numel() > 0:
+                obs_log = torch.log1p(observed_data[:, 0])
+                normalized_d[~missing_mask, 0] = (obs_log - data_mean) / torch.sqrt(data_var)
+                normalized_d[~missing_mask, 1] = observed_data[:, 1]
+
+        elif feature_type in ('surv_weibull', 'surv_loglog', 'surv_piecewise'):
+            data_min, data_max = params
+            if isinstance(data_min, (int, float)):
+                data_min = torch.tensor(data_min, device=d.device, dtype=d.dtype)
+                data_max = torch.tensor(data_max, device=d.device, dtype=d.dtype)
+            else:
+                data_min = data_min.to(d.device)
+                data_max = data_max.to(d.device)
+            normalized_d = torch.zeros_like(d)
+            if observed_data.numel() > 0:
+                normalized_d[~missing_mask] = (observed_data - data_min) / (data_max - data_min)
+
+        else:
+            normalized_d = d.clone()
+
+        normalized_data.append(normalized_d)
+
+    return normalized_data, global_norm_params

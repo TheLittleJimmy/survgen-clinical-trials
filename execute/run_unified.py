@@ -137,6 +137,38 @@ def parse_args():
                     choices=["weibull", "piecewise"],
                     help="Survival family for V4 models (default: weibull).")
 
+    # ---- Phase 0: Diagnostics ----
+    p.add_argument("--log_gradients", action="store_true", default=False,
+                    help="Enable gradient norm logging per epoch (Phase 0C).")
+    p.add_argument("--diagnostics_dir", type=str, default=None,
+                    help="Directory for diagnostics JSONL output (Phase 0A).")
+    p.add_argument("--run_tag", type=str, default=None,
+                    help="Tag for branch-isolation experiments (Phase 0D).")
+
+    # ---- Phase 1: Global normalization ----
+    p.add_argument("--use_legacy_norm", action="store_true", default=False,
+                    help="Use legacy per-batch normalization (default: use frozen global).")
+
+    # ---- Phase 2A: Weighted surrogate objective ----
+    p.add_argument("--lambda_long", type=float, default=1.0,
+                    help="Weight for longitudinal log-lik in surrogate objective (Phase 2A).")
+    p.add_argument("--lambda_surv", type=float, default=1.0,
+                    help="Weight for survival log-lik in surrogate objective (Phase 2A).")
+
+    # ---- Phase 2B: Longitudinal summary ablation ----
+    p.add_argument("--long_summary_type", type=str, default="mean_pool_16",
+                    choices=["mean_pool_16", "mean_pool_32", "mean_pool_64",
+                             "gru_pool", "attention_pool"],
+                    help="Longitudinal summary encoder type (Phase 2B).")
+
+    # ---- Phase 2C: Survival encoder ablation ----
+    p.add_argument("--surv_encoder_ablation", action="store_true", default=False,
+                    help="Enable survival-aware encoder embedding (Phase 2C ablation).")
+
+    # ---- Phase 2D: Missing-data no_grad ablation ----
+    p.add_argument("--no_grad_ablation", action="store_true", default=False,
+                    help="Replace no_grad on missing theta outputs with loss masking (Phase 2D).")
+
     return p.parse_args()
 
 

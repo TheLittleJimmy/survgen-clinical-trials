@@ -36,7 +36,7 @@ def _get_device(device=None):
         return torch.device(device)
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-def train_HIVAE(vae_model, data, miss_mask, true_miss_mask, feat_types_dict, batch_size, lr, epochs, verbose = True, longitudinal_data=None, device=None):
+def train_HIVAE(vae_model, data, miss_mask, true_miss_mask, feat_types_dict, batch_size, lr, epochs, verbose = True, longitudinal_data=None, device=None, global_norm_params=None, log_gradients=False, diagnostics_dir=None, lambda_long=1.0, lambda_surv=1.0):
 
     device = _get_device(device)
     vae_model = vae_model.to(device)

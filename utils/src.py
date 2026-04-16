@@ -35,6 +35,7 @@ class HIVAE(nn.Module):
         set_seed()
         self.feat_types_list = feat_types_dict
         self.model_version = model_version
+        self._global_norm_params = None  # Phase 1: frozen global normalization
 
         # Determine Y dimensionality
         if y_dim_partition:
@@ -280,8 +281,14 @@ class HIVAE(nn.Module):
         Forward pass through the encoder and decoder
         """
 
-        # Batch normalization
-        X_list, normalization_params = data_processing.batch_normalization(batch_data_oberved, self.feat_types_list, batch_miss)
+        # Batch normalization (Phase 1: use frozen global stats if available)
+        if self._global_norm_params is not None:
+            X_list, normalization_params = data_processing.batch_normalization_frozen(
+                batch_data_oberved, self.feat_types_list, batch_miss,
+                self._global_norm_params)
+        else:
+            X_list, normalization_params = data_processing.batch_normalization(
+                batch_data_oberved, self.feat_types_list, batch_miss)
 
         # Encode
         X = torch.cat(X_list, dim=1)
@@ -814,6 +821,145 @@ class HIVAE(nn.Module):
 
         generated = torch.distributions.Normal(mu, torch.sqrt(var)).sample((n_samples,))
         return mu, var, generated
+
+    # ------------------------------------------------------------------
+    # Phase 1: Post-generation longitudinal truncation
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def truncate_longitudinal_at_event(trajectories, time_grid, event_times,
+                                        return_planned=False):
+        """Truncate/mask generated longitudinal visits after sampled event time.
+
+        Parameters
+        ----------
+        trajectories : (n_samples, batch, n_times, D) or (batch, n_times, D)
+            Generated trajectories.
+        time_grid : (n_times,) tensor of normalised times.
+        event_times : (batch,) observed/sampled event times (normalised).
+        return_planned : bool
+            If True, return both planned and observed trajectories.
+
+        Returns
+        -------
+        observed : same shape as trajectories, with post-event visits zeroed out.
+        mask : (batch, n_times) binary mask (1 = pre/at event, 0 = post-event).
+        planned : (optional) original trajectories, only if return_planned=True.
+        """
+        # Expand time_grid to match batch dimension
+        # event_times: (batch,), time_grid: (n_times,)
+        mask = (time_grid.unsqueeze(0) <= event_times.unsqueeze(1)).float()  # (batch, n_times)
+
+        if trajectories.dim() == 4:
+            # (n_samples, batch, n_times, D)
+            mask_exp = mask.unsqueeze(0).unsqueeze(-1)  # (1, batch, n_times, 1)
+            observed = trajectories * mask_exp
+        elif trajectories.dim() == 3:
+            # (batch, n_times, D)
+            mask_exp = mask.unsqueeze(-1)  # (batch, n_times, 1)
+            observed = trajectories * mask_exp
+        else:
+            observed = trajectories
+
+        if return_planned:
+            return observed, mask, trajectories
+        return observed, mask
+
+    # ------------------------------------------------------------------
+    # Phase 2B: Longitudinal summary factory
+    # ------------------------------------------------------------------
+
+    def _build_long_summary_net(self, n_long_outcomes, time_embed_dim,
+                                 summary_type="mean_pool_16"):
+        """Factory for longitudinal summary encoder variants.
+
+        Parameters
+        ----------
+        summary_type : str
+            One of: 'mean_pool_16' (default), 'mean_pool_32', 'mean_pool_64',
+            'gru_pool', 'attention_pool'.
+        """
+        if summary_type == "mean_pool_16":
+            dim = 16
+            net = nn.Sequential(
+                nn.Linear(n_long_outcomes + time_embed_dim, dim),
+                nn.ReLU(),
+                nn.Linear(dim, dim)
+            )
+            return net, dim
+        elif summary_type == "mean_pool_32":
+            dim = 32
+            net = nn.Sequential(
+                nn.Linear(n_long_outcomes + time_embed_dim, dim),
+                nn.ReLU(),
+                nn.Linear(dim, dim)
+            )
+            return net, dim
+        elif summary_type == "mean_pool_64":
+            dim = 64
+            net = nn.Sequential(
+                nn.Linear(n_long_outcomes + time_embed_dim, dim),
+                nn.ReLU(),
+                nn.Linear(dim, dim)
+            )
+            return net, dim
+        elif summary_type == "gru_pool":
+            dim = 16
+            net = nn.GRU(n_long_outcomes + time_embed_dim, dim, batch_first=True)
+            return net, dim
+        elif summary_type == "attention_pool":
+            dim = 16
+            net = nn.Sequential(
+                nn.Linear(n_long_outcomes + time_embed_dim, dim),
+                nn.ReLU(),
+                nn.Linear(dim, dim)
+            )
+            # Attention weight network
+            self._attn_weight_net = nn.Sequential(
+                nn.Linear(dim, 1),
+                nn.Softmax(dim=1)
+            )
+            return net, dim
+        else:
+            raise ValueError(f"Unknown summary_type: {summary_type}")
+
+    # ------------------------------------------------------------------
+    # Phase 2C: Survival-aware encoder embedding (ablation, disabled by default)
+    # ------------------------------------------------------------------
+
+    def _build_survival_embedding(self, embed_dim=8):
+        """Build optional survival embedding for encoder-side ablation.
+
+        Input features: [log1p(t), delta, delta*log1p(t), (1-delta)*log1p(t)]
+        Output: embed_dim-dimensional learned embedding.
+        """
+        return nn.Sequential(
+            nn.Linear(4, 16),
+            nn.ReLU(),
+            nn.Linear(16, embed_dim)
+        )
+
+    def compute_survival_embedding(self, batch_data):
+        """Compute censoring-aware survival embedding from batch data.
+
+        Only used when surv_encoder_ablation is enabled.
+        """
+        if not hasattr(self, 'surv_embed_net'):
+            return None
+        # Find survival feature data
+        for idx_f, feat in enumerate(self.feat_types_list):
+            if feat['type'].startswith('surv'):
+                surv_data = batch_data[idx_f]
+                t = surv_data[:, 0]
+                delta = surv_data[:, 1]
+                log_t = torch.log1p(t)
+                features = torch.stack([
+                    log_t, delta,
+                    delta * log_t,
+                    (1 - delta) * log_t
+                ], dim=1)  # (batch, 4)
+                return self.surv_embed_net(features)
+        return None
 
 
 class HIVAE_factorized(HIVAE):
