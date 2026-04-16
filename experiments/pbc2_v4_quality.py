@@ -174,17 +174,21 @@ def main():
         # ================================================================
         # 02: JOINT / CORRELATION STRUCTURE
         # ================================================================
-        num_cols = [c for c in COLS if c not in ['drug','sex','ascites','hepatomegaly','spiders','censor']]
-        rc = real_df[num_cols].corr(); sc = syn1[num_cols].corr()
+        # Only baseline continuous covariates — exclude survival time/censor
+        # and categorical variables (drug, sex, ascites, hepatomegaly, spiders, edema, histologic)
+        baseline_cont = [c for c in COLS if c not in
+                         ['time','censor','drug','sex','ascites','hepatomegaly',
+                          'spiders','edema','histologic']]
+        rc = real_df[baseline_cont].corr(); sc = syn1[baseline_cont].corr()
         fig, (a1,a2,a3) = plt.subplots(1,3,figsize=(22,7))
         for ax,mat,ttl in [(a1,rc,'Real'),(a2,sc,'Synthetic'),(a3,rc-sc,'Difference')]:
             vmin,vmax = (-1,1) if 'Diff' not in ttl else (-(rc-sc).abs().max().max(), (rc-sc).abs().max().max())
             im=ax.imshow(mat.values,cmap='RdBu_r',vmin=vmin,vmax=vmax)
             ax.set_title(ttl,fontweight='bold',fontsize=12)
-            ax.set_xticks(range(len(num_cols))); ax.set_xticklabels(num_cols,rotation=45,ha='right',fontsize=8)
-            ax.set_yticks(range(len(num_cols))); ax.set_yticklabels(num_cols,fontsize=8)
+            ax.set_xticks(range(len(baseline_cont))); ax.set_xticklabels(baseline_cont,rotation=45,ha='right',fontsize=8)
+            ax.set_yticks(range(len(baseline_cont))); ax.set_yticklabels(baseline_cont,fontsize=8)
             plt.colorbar(im,ax=ax,fraction=0.046)
-        fig.suptitle(f"{label}: Correlation Matrix Comparison",fontsize=14,fontweight='bold')
+        fig.suptitle(f"{label}: Baseline Covariate Correlation (excl. survival time)",fontsize=14,fontweight='bold')
         plt.tight_layout(); plt.savefig(BASE_OUT/"02_joint_structure"/f"{vname}_correlation.png",dpi=200); plt.close()
         print(f"  Saved: 02_joint_structure/{vname}_correlation.png")
 
