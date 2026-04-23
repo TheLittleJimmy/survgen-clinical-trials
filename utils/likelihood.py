@@ -496,6 +496,8 @@ def loglik_surv_weibull(batch_data, list_type, theta, normalization_params, n_ge
     # Compute log-likelihood
     T_surv, delta = data[:, 0], data[:, 1]
     T_surv_scaled = (T_surv - data_min) / (data_max - data_min)
+    # Phase 1: epsilon clamp to prevent NaN/Inf in log-hazard at exact zero
+    T_surv_scaled = torch.clamp(T_surv_scaled, min=1e-5)
     log_p_x_T = delta * weibull.log_hazard(torch.stack([log_est_scale_T, log_est_shape_T]).T, T_surv_scaled, respective_times=True) - weibull._cumulative_hazard(torch.stack([log_est_scale_T, log_est_shape_T]).T, T_surv_scaled, respective_times=True)
     log_p_x_C = (1 - delta) * weibull.log_hazard(torch.stack([log_est_scale_C, log_est_shape_C]).T, T_surv_scaled, respective_times=True) - weibull._cumulative_hazard(torch.stack([log_est_scale_C, log_est_shape_C]).T, T_surv_scaled, respective_times=True)
 
